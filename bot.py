@@ -94,6 +94,21 @@ async def handle_event(payload):
 
 @bot.event
 async def on_ready():
+    # Add to bot.py, inside on_ready()
+async def self_ping():
+    import httpx
+    url = "https://your-bot.onrender.com/health"
+    while True:
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.get(url)
+            print("🔄 Self-ping sent")
+        except:
+            pass
+        await asyncio.sleep(300)  # 5 minutes
+
+bot.loop.create_task(self_ping())
+
     print(f"✅ Bot logged in as {bot.user}")
     # Start realtime subscription
     async def realtime_loop():
