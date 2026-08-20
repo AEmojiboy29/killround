@@ -3,10 +3,12 @@ import json
 import asyncio
 from datetime import datetime
 from supabase import create_client, Client
-from discord import Intents, Embed, Color, TextChannel
+from discord import Intents, Embed, Color
 from discord.ext import commands
 from discord.app_commands import CommandTree, describe
 import httpx
+from flask import Flask
+import threading
 
 # === ENV ===
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -23,6 +25,17 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = CommandTree(bot)
 
+# === Flask Health Server ===
+app = Flask(__name__)
+
+@app.route('/')
+@app.route('/health')
+def health():
+    return "OK", 200
+
+def run_flask():
+    app.run(host='0.0.0.0', port=10000)
+
 # === Helpers ===
 async def send_discord_embed(title, description, fields, color=0x00FF00, thumbnail=None):
     if not DISCORD_CHANNEL_ID:
@@ -37,7 +50,7 @@ async def send_discord_embed(title, description, fields, color=0x00FF00, thumbna
         embed.add_field(name=field["name"], value=field["value"], inline=field.get("inline", True))
     await channel.send(embed=embed)
 
-# === Supabase Realtime Listener (events table) ===
+# === Supabase Realtime Listener ===
 async def handle_event(payload):
     if payload["event_type"] != "INSERT":
         return
@@ -84,7 +97,6 @@ async def handle_event(payload):
             color=0x00AAFF
         )
     else:
-        # generic log
         await send_discord_embed(
             title=f"📌 {event_type}",
             description=json.dumps(record, indent=2)[:1000],
@@ -92,42 +104,37 @@ async def handle_event(payload):
             color=0x808080
         )
 
-@bot.event
-async def on_ready():
-    # Add to bot.py, inside on_ready()
+# === Self-ping to keep alive ===
 async def self_ping():
-    import httpx
     url = "https://your-bot.onrender.com/health"
     while True:
         try:
             async with httpx.AsyncClient() as client:
                 await client.get(url)
             print("🔄 Self-ping sent")
-        except:
-            pass
-        await asyncio.sleep(300)  # 5 minutes
+        except Exception as e:
+            print(f"Self-ping error: {e}")
+        await asyncio.sleep(300)
 
-bot.loop.create_task(self_ping())
+# === Realtime Polling ===
+async def realtime_loop():
+    last_id = 0
+    while True:
+        try:
+            res = supabase.table("events").select("*").gt("id", last_id).order("id").execute()
+            if res.data:
+                for row in res.data:
+                    await handle_event({"event_type": "INSERT", "new": row})
+                    last_id = max(last_id, row["id"])
+        except Exception as e:
+            print(f"Poll error: {e}")
+        await asyncio.sleep(5)
 
+@bot.event
+async def on_ready():
     print(f"✅ Bot logged in as {bot.user}")
-    # Start realtime subscription
-    async def realtime_loop():
-        # Using supabase-py's realtime via websocket is not trivial; we'll poll instead.
-        # For production, use supabase-realtime library or WebSocket directly.
-        # Simpler: poll events table every 5 seconds for new rows.
-        # We'll store last processed id in bot memory.
-        last_id = 0
-        while True:
-            try:
-                res = supabase.table("events").select("*").gt("id", last_id).order("id").execute()
-                if res.data:
-                    for row in res.data:
-                        await handle_event({"event_type": "INSERT", "new": row})
-                        last_id = max(last_id, row["id"])
-            except Exception as e:
-                print(f"Poll error: {e}")
-            await asyncio.sleep(5)
     bot.loop.create_task(realtime_loop())
+    bot.loop.create_task(self_ping())
     await tree.sync()
     print("✅ Commands synced")
 
@@ -194,6 +201,7 @@ async def register(interaction, player: str, role: str = "alt"):
     supabase.table("autofarm").upsert(data, on_conflict="player_name").execute()
     await interaction.response.send_message(f"✅ Registered {player} as {role}")
 
-# === Run ===
+# === Start Flask + Bot ===
 if __name__ == "__main__":
+    threading.Thread(target=run_flask, daemon=True).start()
     bot.run(DISCORD_TOKEN)
