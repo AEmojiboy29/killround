@@ -11,6 +11,14 @@ import httpx
 from flask import Flask
 import threading
 
+# Install aiohttp-socks if not already installed
+try:
+    import aiohttp_socks
+except ImportError:
+    import subprocess
+    subprocess.check_call(['pip', 'install', 'aiohttp-socks'])
+    import aiohttp_socks
+
 # === ENV ===
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
@@ -33,11 +41,18 @@ original_request = HTTPClient.request
 
 async def proxied_request(self, route, **kwargs):
     if DISCORD_PROXY:
-        kwargs['proxy'] = DISCORD_PROXY
+        # For SOCKS4 proxy
+        if DISCORD_PROXY.startswith('socks4://'):
+            # Create a connector with SOCKS4
+            from aiohttp import TCPConnector
+            connector = aiohttp_socks.SocksConnector.from_url(DISCORD_PROXY)
+            kwargs['connector'] = connector
+        else:
+            kwargs['proxy'] = DISCORD_PROXY
     return await original_request(self, route, **kwargs)
 
 HTTPClient.request = proxied_request
-print("[Proxy] HTTPClient patched.")
+print("[Proxy] HTTPClient patched with SOCKS4 support.")
 
 # === Flask health check ===
 app = Flask(__name__)
@@ -132,9 +147,9 @@ async def handle_event(payload):
 async def on_ready():
     print(f"✅ Bot logged in as {bot.user}")
 
-    # Self-ping to keep Render alive
+    # Self-ping to keep Render alive (replace URL)
     async def self_ping():
-        url = "https://your-bot.onrender.com/health"  # Replace with actual URL
+        url = "https://your-bot.onrender.com/health"
         while True:
             try:
                 async with httpx.AsyncClient() as client:
