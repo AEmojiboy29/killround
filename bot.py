@@ -1,18 +1,55 @@
 import os
 import json
 import asyncio
+import aiohttp
 from datetime import datetime
 from supabase import create_client, Client
 from discord import Intents, Embed, Color
 from discord.ext import commands
 from discord.app_commands import describe
+from discord.http import HTTPClient
 import httpx
+from flask import Flask
+import threading
+
+# === Patch HTTPClient to use proxy ===
+original_request = HTTPClient.request
+
+async def proxied_request(self, route, **kwargs):
+    proxy = os.environ.get("DISCORD_PROXY")
+    if proxy:
+        kwargs['proxy'] = proxy
+    return await original_request(self, route, **kwargs)
+
+HTTPClient.request = proxied_request
+print("[Proxy] HTTPClient patched. Proxy:", os.environ.get("DISCORD_PROXY"))
 
 # === ENV ===
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
-DISCORD_CHANNEL_ID = int(os.environ.get("DISCORD_CHANNEL_ID", 0))
+DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID")
+
+if not DISCORD_TOKEN:
+    raise ValueError("DISCORD_TOKEN not set")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
+if not DISCORD_CHANNEL_ID:
+    raise ValueError("DISCORD_CHANNEL_ID must be set")
+DISCORD_CHANNEL_ID = int(DISCORD_CHANNEL_ID)
+
+# === Flask health check (for Render) ===
+app = Flask(__name__)
+
+@app.route('/')
+@app.route('/health')
+def health():
+    return "OK", 200
+
+def run_flask():
+    app.run(host='0.0.0.0', port=10000)
+
+threading.Thread(target=run_flask, daemon=True).start()
 
 # === Supabase Client ===
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -94,9 +131,9 @@ async def handle_event(payload):
 async def on_ready():
     print(f"✅ Bot logged in as {bot.user}")
 
-    # Self-ping to keep Render alive
+    # Self-ping to keep Render alive (optional)
     async def self_ping():
-        url = "https://your-bot.onrender.com/health"
+        url = "https://your-bot.onrender.com/health"  # Replace with actual URL
         while True:
             try:
                 async with httpx.AsyncClient() as client:
@@ -125,7 +162,7 @@ async def on_ready():
     await bot.tree.sync()
     print("✅ Commands synced")
 
-# === Slash Commands (using bot.tree) ===
+# === Slash Commands ===
 @bot.tree.command(name="status", description="Show all players and their status")
 async def status(interaction):
     res = supabase.table("autofarm").select("*").execute()
