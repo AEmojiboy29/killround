@@ -5,10 +5,8 @@ from datetime import datetime
 from supabase import create_client, Client
 from discord import Intents, Embed, Color
 from discord.ext import commands
-from discord.app_commands import CommandTree, describe
+from discord.app_commands import describe
 import httpx
-from flask import Flask
-import threading
 
 # === ENV ===
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -23,18 +21,6 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 intents = Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-tree = CommandTree(bot)
-
-# === Flask Health Server ===
-app = Flask(__name__)
-
-@app.route('/')
-@app.route('/health')
-def health():
-    return "OK", 200
-
-def run_flask():
-    app.run(host='0.0.0.0', port=10000)
 
 # === Helpers ===
 async def send_discord_embed(title, description, fields, color=0x00FF00, thumbnail=None):
@@ -104,42 +90,43 @@ async def handle_event(payload):
             color=0x808080
         )
 
-# === Self-ping to keep alive ===
-async def self_ping():
-    url = "https://your-bot.onrender.com/health"
-    while True:
-        try:
-            async with httpx.AsyncClient() as client:
-                await client.get(url)
-            print("🔄 Self-ping sent")
-        except Exception as e:
-            print(f"Self-ping error: {e}")
-        await asyncio.sleep(300)
-
-# === Realtime Polling ===
-async def realtime_loop():
-    last_id = 0
-    while True:
-        try:
-            res = supabase.table("events").select("*").gt("id", last_id).order("id").execute()
-            if res.data:
-                for row in res.data:
-                    await handle_event({"event_type": "INSERT", "new": row})
-                    last_id = max(last_id, row["id"])
-        except Exception as e:
-            print(f"Poll error: {e}")
-        await asyncio.sleep(5)
-
 @bot.event
 async def on_ready():
     print(f"✅ Bot logged in as {bot.user}")
-    bot.loop.create_task(realtime_loop())
+
+    # Self-ping to keep Render alive
+    async def self_ping():
+        url = "https://your-bot.onrender.com/health"
+        while True:
+            try:
+                async with httpx.AsyncClient() as client:
+                    await client.get(url)
+                print("🔄 Self-ping sent")
+            except:
+                pass
+            await asyncio.sleep(300)
     bot.loop.create_task(self_ping())
-    await tree.sync()
+
+    # Poll events table
+    async def realtime_loop():
+        last_id = 0
+        while True:
+            try:
+                res = supabase.table("events").select("*").gt("id", last_id).order("id").execute()
+                if res.data:
+                    for row in res.data:
+                        await handle_event({"event_type": "INSERT", "new": row})
+                        last_id = max(last_id, row["id"])
+            except Exception as e:
+                print(f"Poll error: {e}")
+            await asyncio.sleep(5)
+    bot.loop.create_task(realtime_loop())
+
+    await bot.tree.sync()
     print("✅ Commands synced")
 
-# === Slash Commands ===
-@tree.command(name="status", description="Show all players and their status")
+# === Slash Commands (using bot.tree) ===
+@bot.tree.command(name="status", description="Show all players and their status")
 async def status(interaction):
     res = supabase.table("autofarm").select("*").execute()
     data = res.data
@@ -161,30 +148,30 @@ async def status(interaction):
         )
     await interaction.response.send_message(embed=embed)
 
-@tree.command(name="toggle", description="Enable/disable autofarm for a player")
+@bot.tree.command(name="toggle", description="Enable/disable autofarm for a player")
 @describe(player="Player name", state="on or off")
 async def toggle(interaction, player: str, state: str):
     state_bool = state.lower() == "on"
     supabase.table("autofarm").update({"active": state_bool}).eq("player_name", player).execute()
     await interaction.response.send_message(f"✅ {player} set to {'ON' if state_bool else 'OFF'}")
 
-@tree.command(name="set", description="Send a command to a player")
+@bot.tree.command(name="set", description="Send a command to a player")
 @describe(player="Player name", command="stop | start | kick | round:N")
 async def set_command(interaction, player: str, command: str):
     supabase.table("autofarm").update({"command": command}).eq("player_name", player).execute()
     await interaction.response.send_message(f"📨 Sent `{command}` to {player}")
 
-@tree.command(name="kick_all", description="Kick all registered players")
+@bot.tree.command(name="kick_all", description="Kick all registered players")
 async def kick_all(interaction):
     supabase.table("autofarm").update({"command": "kick"}).neq("player_name", "").execute()
     await interaction.response.send_message("🔨 Sent kick command to all players.")
 
-@tree.command(name="reset", description="Reset rounds for all players")
+@bot.tree.command(name="reset", description="Reset rounds for all players")
 async def reset(interaction):
     supabase.table("autofarm").update({"rounds": 0}).neq("player_name", "").execute()
     await interaction.response.send_message("🔄 Rounds reset for all active players")
 
-@tree.command(name="register", description="Register a player (add to DB if missing)")
+@bot.tree.command(name="register", description="Register a player (add to DB if missing)")
 @describe(player="Player name", role="main or alt")
 async def register(interaction, player: str, role: str = "alt"):
     is_main = role.lower() == "main"
@@ -201,7 +188,6 @@ async def register(interaction, player: str, role: str = "alt"):
     supabase.table("autofarm").upsert(data, on_conflict="player_name").execute()
     await interaction.response.send_message(f"✅ Registered {player} as {role}")
 
-# === Start Flask + Bot ===
+# === Run ===
 if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
     bot.run(DISCORD_TOKEN)
