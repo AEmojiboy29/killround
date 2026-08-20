@@ -1,34 +1,32 @@
 import os
 import json
 import asyncio
-import aiohttp
+import random
 from datetime import datetime
 from supabase import create_client, Client
 from discord import Intents, Embed, Color
 from discord.ext import commands
 from discord.app_commands import describe
 from discord.http import HTTPClient
+import aiohttp
 import httpx
 from flask import Flask
 import threading
 
-# === Patch HTTPClient to use proxy ===
-original_request = HTTPClient.request
-
-async def proxied_request(self, route, **kwargs):
-    proxy = os.environ.get("DISCORD_PROXY")
-    if proxy:
-        kwargs['proxy'] = proxy
-    return await original_request(self, route, **kwargs)
-
-HTTPClient.request = proxied_request
-print("[Proxy] HTTPClient patched. Proxy:", os.environ.get("DISCORD_PROXY"))
+# === User-Agent rotation (helps avoid Cloudflare) ===
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+]
 
 # === ENV ===
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID")
+DISCORD_PROXY = os.environ.get("DISCORD_PROXY")  # e.g., http://user:pass@proxy:8080
 
 if not DISCORD_TOKEN:
     raise ValueError("DISCORD_TOKEN not set")
@@ -38,7 +36,42 @@ if not DISCORD_CHANNEL_ID:
     raise ValueError("DISCORD_CHANNEL_ID must be set")
 DISCORD_CHANNEL_ID = int(DISCORD_CHANNEL_ID)
 
-# === Flask health check (for Render) ===
+print(f"[Proxy] Proxy configured: {'Yes' if DISCORD_PROXY else 'No'}")
+
+# === Patch discord.py HTTP client with proxy + UA rotation ===
+original_request = HTTPClient.request
+
+async def proxied_request(self, route, **kwargs):
+    # Set a random user-agent
+    headers = kwargs.get('headers', {})
+    headers['User-Agent'] = random.choice(USER_AGENTS)
+    kwargs['headers'] = headers
+
+    # Add proxy if configured
+    if DISCORD_PROXY:
+        kwargs['proxy'] = DISCORD_PROXY
+
+    # Retry on 429 with backoff
+    retries = 3
+    for attempt in range(retries):
+        try:
+            return await original_request(self, route, **kwargs)
+        except Exception as e:
+            if attempt == retries - 1:
+                raise
+            # Cloudflare 429: wait longer
+            if "429" in str(e) or "Cloudflare" in str(e):
+                wait = (2 ** attempt) + random.uniform(0, 1)
+                print(f"[Proxy] Rate limited. Retrying in {wait:.2f}s...")
+                await asyncio.sleep(wait)
+            else:
+                raise
+    return None
+
+HTTPClient.request = proxied_request
+print("[Proxy] HTTPClient patched with UA rotation and retry.")
+
+# === Flask health check ===
 app = Flask(__name__)
 
 @app.route('/')
@@ -131,7 +164,7 @@ async def handle_event(payload):
 async def on_ready():
     print(f"✅ Bot logged in as {bot.user}")
 
-    # Self-ping to keep Render alive (optional)
+    # Self-ping to keep Render alive
     async def self_ping():
         url = "https://your-bot.onrender.com/health"  # Replace with actual URL
         while True:
@@ -224,6 +257,10 @@ async def register(interaction, player: str, role: str = "alt"):
     }
     supabase.table("autofarm").upsert(data, on_conflict="player_name").execute()
     await interaction.response.send_message(f"✅ Registered {player} as {role}")
+
+# === Run ===
+if __name__ == "__main__":
+    bot.run(DISCORD_TOKEN)
 
 # === Run ===
 if __name__ == "__main__":
